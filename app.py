@@ -1,14 +1,15 @@
 """
 app.py
-Personal Expense Tracker - Streamlit app (Step 3: Budget Alerts + Charts)
+Personal Expense Tracker - Streamlit app (Step 4: NLP Entry + Budget Alerts + Charts)
 """
 
+import re
+import json
+import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date
-import json
-import os
+from datetime import date, timedelta
 import database as db
 
 # ---------------------------------------------------------------------------
@@ -22,7 +23,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS — gives the app a cleaner, more "designed" look
+# Custom CSS
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -87,7 +88,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Category → icon mapping
+# Category -> icon mapping
 # ---------------------------------------------------------------------------
 CATEGORY_ICONS = {
     "Food": "🍔",
@@ -102,6 +103,46 @@ CATEGORY_ICONS = {
 
 def icon_for(category: str) -> str:
     return CATEGORY_ICONS.get(category, "📌")
+
+# ---------------------------------------------------------------------------
+# Rule-based Natural Language Expense Parser (no AI API needed)
+# ---------------------------------------------------------------------------
+CATEGORY_KEYWORDS = {
+    "Food": ["lunch", "dinner", "breakfast", "food", "restaurant", "coffee", "snack", "pizza", "groceries", "grocery"],
+    "Transport": ["uber", "ola", "taxi", "bus", "train", "petrol", "fuel", "auto", "cab", "metro"],
+    "Rent": ["rent", "landlord"],
+    "Shopping": ["shopping", "clothes", "shoes", "amazon", "flipkart", "mall"],
+    "Entertainment": ["movie", "netflix", "concert", "game", "spotify", "cinema"],
+    "Bills": ["electricity", "bill", "recharge", "wifi", "internet", "water bill"],
+    "Education": ["book", "course", "tuition", "fees", "exam"],
+}
+
+def parse_expense_text(text: str):
+    """
+    Parses a natural language expense string like:
+    'spent 250 on lunch yesterday'
+    Returns (amount, category, description, expense_date).
+    """
+    text_lower = text.lower()
+
+    amount_match = re.search(r'(\d+(\.\d+)?)', text)
+    amount = float(amount_match.group(1)) if amount_match else None
+
+    expense_date = date.today()
+    if "yesterday" in text_lower:
+        expense_date = date.today() - timedelta(days=1)
+    elif "today" in text_lower:
+        expense_date = date.today()
+
+    category = "Other"
+    for cat, keywords in CATEGORY_KEYWORDS.items():
+        if any(kw in text_lower for kw in keywords):
+            category = cat
+            break
+
+    description = text.strip().capitalize()
+
+    return amount, category, description, expense_date
 
 # ---------------------------------------------------------------------------
 # Budget persistence (simple local JSON file)
@@ -125,10 +166,28 @@ def save_budget(amount: float):
 db.init_db()
 
 # ---------------------------------------------------------------------------
-# Sidebar — Add Expense Form
+# Sidebar - Add Expense Form
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### ➕ Add Expense")
+    st.markdown("### 🗣️ Quick Add (Natural Language)")
+    st.caption('Try: "spent 250 on lunch today"')
+
+    nl_text = st.text_input("Describe your expense", placeholder="e.g. spent 200 on uber yesterday", key="nl_input")
+    if st.button("✨ Parse & Add", width='stretch'):
+        if nl_text.strip() == "":
+            st.warning("Type something first.")
+        else:
+            amount, category, description, expense_date = parse_expense_text(nl_text)
+            if amount is None:
+                st.error("Couldn't find an amount. Try including a number, e.g. 'spent 200 on lunch'.")
+            else:
+                db.add_expense(str(expense_date), category, description, amount)
+                st.success(f"Added {icon_for(category)} ₹{amount:.2f} — {category} ({expense_date})")
+                st.rerun()
+
+    st.divider()
+
+    st.markdown("### ➕ Add Expense (Manual)")
     st.caption("Log a new transaction")
 
     with st.form("add_expense_form", clear_on_submit=True):
@@ -149,7 +208,6 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Budget Setting ---
     st.markdown("### 🎯 Monthly Budget")
     current_budget = load_budget()
     new_budget = st.number_input(
@@ -191,7 +249,6 @@ if rows:
     col3.metric("🧾 Transactions", f"{num_transactions}")
     col4.metric("🏆 Top Category", f"{icon_for(top_category)} {top_category}")
 
-    # --- Budget Alert Section ---
     if monthly_budget > 0:
         st.markdown("<hr>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">🎯 Budget Tracker</div>', unsafe_allow_html=True)

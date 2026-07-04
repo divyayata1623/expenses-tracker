@@ -1,11 +1,14 @@
 """
 app.py
-Personal Expense Tracker - Streamlit app (Step 2.5: Improved UI/UX)
+Personal Expense Tracker - Streamlit app (Step 3: Budget Alerts + Charts)
 """
 
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from datetime import date
+import json
+import os
 import database as db
 
 # ---------------------------------------------------------------------------
@@ -101,6 +104,22 @@ def icon_for(category: str) -> str:
     return CATEGORY_ICONS.get(category, "📌")
 
 # ---------------------------------------------------------------------------
+# Budget persistence (simple local JSON file)
+# ---------------------------------------------------------------------------
+BUDGET_FILE = "data/budget.json"
+
+def load_budget() -> float:
+    if os.path.exists(BUDGET_FILE):
+        with open(BUDGET_FILE, "r") as f:
+            return json.load(f).get("monthly_budget", 0.0)
+    return 0.0
+
+def save_budget(amount: float):
+    os.makedirs("data", exist_ok=True)
+    with open(BUDGET_FILE, "w") as f:
+        json.dump({"monthly_budget": amount}, f)
+
+# ---------------------------------------------------------------------------
 # Init DB
 # ---------------------------------------------------------------------------
 db.init_db()
@@ -129,6 +148,23 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
+
+    # --- Budget Setting ---
+    st.markdown("### 🎯 Monthly Budget")
+    current_budget = load_budget()
+    new_budget = st.number_input(
+        "Set your monthly budget (₹)",
+        min_value=0.0,
+        step=500.0,
+        value=current_budget,
+        format="%.2f"
+    )
+    if st.button("💾 Save Budget", width='stretch'):
+        save_budget(new_budget)
+        st.success(f"Budget set to ₹{new_budget:,.2f}")
+        st.rerun()
+
+    st.divider()
     st.caption("💡 Tip: add a few expenses across different categories to see the dashboard come alive.")
 
 # ---------------------------------------------------------------------------
@@ -138,6 +174,7 @@ st.markdown('<div class="main-title">💰 Personal Expense Tracker</div>', unsaf
 st.markdown('<div class="subtitle">Track where your money goes, one entry at a time.</div>', unsafe_allow_html=True)
 
 rows = db.get_all_expenses()
+monthly_budget = load_budget()
 
 if rows:
     df = pd.DataFrame(rows, columns=["ID", "Date", "Category", "Description", "Amount"])
@@ -154,9 +191,24 @@ if rows:
     col3.metric("🧾 Transactions", f"{num_transactions}")
     col4.metric("🏆 Top Category", f"{icon_for(top_category)} {top_category}")
 
+    # --- Budget Alert Section ---
+    if monthly_budget > 0:
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🎯 Budget Tracker</div>', unsafe_allow_html=True)
+
+        percent_used = min(this_month / monthly_budget, 1.0)
+        st.progress(percent_used, text=f"₹{this_month:,.0f} of ₹{monthly_budget:,.0f} used ({percent_used*100:.0f}%)")
+
+        if this_month >= monthly_budget:
+            st.error(f"🚨 You've exceeded your monthly budget of ₹{monthly_budget:,.0f}!")
+        elif this_month >= 0.8 * monthly_budget:
+            st.warning(f"⚠️ You've used {percent_used*100:.0f}% of your monthly budget. Slow down!")
+        else:
+            st.success(f"✅ You're within budget — {percent_used*100:.0f}% used.")
+
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    tab1, tab2 = st.tabs(["📋 All Expenses", "🗑️ Manage"])
+    tab1, tab2, tab3 = st.tabs(["📋 All Expenses", "📊 Charts", "🗑️ Manage"])
 
     with tab1:
         st.markdown('<div class="section-header">Recent Transactions</div>', unsafe_allow_html=True)
@@ -177,6 +229,34 @@ if rows:
         )
 
     with tab2:
+        st.markdown('<div class="section-header">Spending Breakdown</div>', unsafe_allow_html=True)
+
+        chart_col1, chart_col2 = st.columns(2)
+
+        with chart_col1:
+            category_totals = df.groupby("Category")["Amount"].sum().reset_index()
+            fig_pie = px.pie(
+                category_totals,
+                names="Category",
+                values="Amount",
+                title="By Category",
+                hole=0.4
+            )
+            st.plotly_chart(fig_pie, width='stretch')
+
+        with chart_col2:
+            daily_totals = df.groupby(df["Date"].dt.date)["Amount"].sum().reset_index()
+            daily_totals.columns = ["Date", "Amount"]
+            fig_line = px.line(
+                daily_totals,
+                x="Date",
+                y="Amount",
+                title="Spending Over Time",
+                markers=True
+            )
+            st.plotly_chart(fig_line, width='stretch')
+
+    with tab3:
         st.markdown('<div class="section-header">Delete a Transaction</div>', unsafe_allow_html=True)
         st.caption("Select an ID from the table above and remove it here.")
 

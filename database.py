@@ -2,18 +2,17 @@
 database.py
 Handles all SQLite database operations for the Expense Tracker.
 """
-
 import sqlite3
+import os
 from datetime import date
 
 DB_NAME = "data/expenses.db"
 
-
 def get_connection():
     """Create and return a SQLite connection."""
+    os.makedirs(os.path.dirname(DB_NAME), exist_ok=True)
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     return conn
-
 
 def init_db():
     """Create the expenses table if it doesn't already exist."""
@@ -31,7 +30,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def add_expense(expense_date: str, category: str, description: str, amount: float):
     """Insert a new expense record."""
     conn = get_connection()
@@ -43,7 +41,6 @@ def add_expense(expense_date: str, category: str, description: str, amount: floa
     conn.commit()
     conn.close()
 
-
 def get_all_expenses():
     """Return all expenses as a list of tuples, most recent first."""
     conn = get_connection()
@@ -53,7 +50,6 @@ def get_all_expenses():
     conn.close()
     return rows
 
-
 def delete_expense(expense_id: int):
     """Delete an expense by its ID."""
     conn = get_connection()
@@ -61,7 +57,6 @@ def delete_expense(expense_id: int):
     cursor.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
     conn.commit()
     conn.close()
-
 
 def get_total_by_category():
     """Return total spend grouped by category — used later for charts."""

@@ -123,6 +123,11 @@ CATEGORY_KEYWORDS = {
     "Education": ["book", "course", "tuition", "fees", "exam"],
 }
 
+def pdf_safe(text) -> str:
+    """Strip/replace characters that FPDF's core Helvetica font can't encode
+    (e.g. ₹ and emoji), so PDF export never crashes on unicode input."""
+    return str(text).encode("latin-1", errors="replace").decode("latin-1")
+
 def generate_pdf_report(df, total_spent, this_month, monthly_budget):
     pdf = FPDF()
     pdf.add_page()
@@ -151,9 +156,9 @@ def generate_pdf_report(df, total_spent, this_month, monthly_budget):
 
     pdf.set_font("Helvetica", "", 9)
     for _, row in df.iterrows():
-        pdf.cell(30, 7, row["Date"].strftime("%d %b %Y"), border=1)
-        pdf.cell(35, 7, str(row["Category"]), border=1)
-        pdf.cell(75, 7, str(row["Description"])[:40], border=1)
+        pdf.cell(30, 7, pdf_safe(row["Date"].strftime("%d %b %Y")), border=1)
+        pdf.cell(35, 7, pdf_safe(row["Category"]), border=1)
+        pdf.cell(75, 7, pdf_safe(str(row["Description"])[:40]), border=1)
         pdf.cell(30, 7, f"Rs. {row['Amount']:,.2f}", border=1, ln=True)
 
     return bytes(pdf.output())
@@ -203,7 +208,7 @@ def voice_input_component():
               display:none; background-color:#16a34a; color:white; border:none;
               border-radius:10px; padding:8px 16px; font-weight:600;
               font-size:0.9rem; cursor:pointer; width:100%; margin-top:6px;">
-            ✅ Use this
+            ✅ Use &amp; Add
           </button>
         </div>
         <script>
@@ -230,7 +235,7 @@ def voice_input_component():
 
           recognition.onresult = (event) => {
             lastTranscript = event.results[0][0].transcript;
-            status.innerText = 'Heard: "' + lastTranscript + '" — tap Use this to confirm.';
+            status.innerText = 'Heard: "' + lastTranscript + '" — tap Use & Add to confirm.';
             useBtn.style.display = "block";
           };
 
@@ -245,11 +250,53 @@ def voice_input_component():
             }
           };
 
-          // This runs inside a fresh click event, so top-navigation is allowed.
+          // NOTE: We do NOT navigate/reload the page here. Streamlit's
+          // components.html() iframe is sandboxed WITHOUT the
+          // "allow-top-navigation" flag, so window.parent.location.href
+          // (or any redirect) is silently blocked by the browser - that's
+          // why "Use this" previously did nothing.
+          // Instead, we reach into the parent page's DOM (same-origin
+          // access IS allowed), fill the existing "Describe your expense"
+          // box, and blur it. Blurring syncs the value to Streamlit AND
+          // triggers the input's on_change callback in Python, which adds
+          // the expense automatically — one tap on "Use & Add" is all it
+          // takes, no second click anywhere.
           useBtn.onclick = () => {
-            const url = new URL(window.parent.location.href);
-            url.searchParams.set('voice_transcript', lastTranscript);
-            window.parent.location.href = url.toString();
+            try {
+              const parentDoc = window.parent.document;
+              let target = parentDoc.querySelector('input[aria-label="Describe your expense"]');
+              if (!target) {
+                const candidates = parentDoc.querySelectorAll('input[type="text"]');
+                for (const inp of candidates) {
+                  if (inp.placeholder && inp.placeholder.indexOf('spent 200') !== -1) {
+                    target = inp;
+                    break;
+                  }
+                }
+              }
+              if (!target) {
+                status.innerText = 'Heard it, but could not find the expense box. Please type it in manually: "' + lastTranscript + '"';
+                return;
+              }
+
+              const nativeSetter = Object.getOwnPropertyDescriptor(
+                window.parent.HTMLInputElement.prototype, 'value'
+              ).set;
+              nativeSetter.call(target, lastTranscript);
+              target.dispatchEvent(new Event('input', { bubbles: true }));
+              target.dispatchEvent(new Event('change', { bubbles: true }));
+              // Blurring forces Streamlit to sync the new value to the
+              // Python backend AND fires the input's on_change callback,
+              // which parses the text and adds the expense automatically -
+              // no button click needed on either side.
+              target.blur();
+              target.dispatchEvent(new Event('blur', { bubbles: true }));
+
+              status.innerText = 'Added: "' + lastTranscript + '"';
+              useBtn.style.display = "none";
+            } catch (e) {
+              status.innerText = 'Could not auto-fill. Please type it in manually: "' + lastTranscript + '"';
+            }
           };
         }
         </script>
@@ -279,24 +326,45 @@ def save_budget(amount: float):
 db.init_db()
 
 # ---------------------------------------------------------------------------
+# Quick Add callback — fires automatically whenever the "Describe your
+# expense" box changes (Enter key, clicking away, OR the voice component
+# filling it in and blurring). No button click required.
+# ---------------------------------------------------------------------------
+def handle_nl_input_change():
+    text = st.session_state.get("nl_input", "").strip()
+    if not text:
+        return
+    amount, category, description, expense_date = parse_expense_text(text)
+    if amount is None:
+        st.session_state["quick_add_error"] = (
+            "Couldn't find an amount. Try including a number, e.g. 'spent 200 on lunch'."
+        )
+    else:
+        db.add_expense(str(expense_date), category, description, amount)
+        st.session_state["quick_add_success"] = (
+            f"Added {icon_for(category)} ₹{amount:.2f} — {category} ({expense_date})"
+        )
+    # Clear the box now that it's been processed. Safe to do here because
+    # this callback runs before the widget is re-instantiated this run.
+    st.session_state["nl_input"] = ""
+
+# ---------------------------------------------------------------------------
 # Sidebar - Add Expense Form
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### 🗣️ Quick Add (Natural Language)")
-    st.caption('Try: "spent 250 on lunch today"')
+    st.caption('Try: "spent 250 on lunch today" — press Enter to add.')
 
-    nl_text = st.text_input("Describe your expense", placeholder="e.g. spent 200 on uber yesterday", key="nl_input")
-    if st.button("✨ Parse & Add", width='stretch'):
-        if nl_text.strip() == "":
-            st.warning("Type something first.")
-        else:
-            amount, category, description, expense_date = parse_expense_text(nl_text)
-            if amount is None:
-                st.error("Couldn't find an amount. Try including a number, e.g. 'spent 200 on lunch'.")
-            else:
-                db.add_expense(str(expense_date), category, description, amount)
-                st.success(f"Added {icon_for(category)} ₹{amount:.2f} — {category} ({expense_date})")
-                st.rerun()
+    st.text_input(
+        "Describe your expense",
+        placeholder="e.g. spent 200 on uber yesterday",
+        key="nl_input",
+        on_change=handle_nl_input_change,
+    )
+    if st.session_state.get("quick_add_success"):
+        st.success(st.session_state.pop("quick_add_success"))
+    if st.session_state.get("quick_add_error"):
+        st.error(st.session_state.pop("quick_add_error"))
 
     st.divider()
 
@@ -304,43 +372,7 @@ with st.sidebar:
     st.caption('Tap and say something like: "spent 250 on lunch today"')
 
     voice_input_component()
-
-    if "voice_transcript" in st.query_params:
-        transcript = st.query_params["voice_transcript"]
-        st.info(f'🎙️ Heard: "{transcript}"')
-
-        v_amount, v_category, v_description, v_date = parse_expense_text(transcript)
-        category_options = list(CATEGORY_ICONS.keys())
-        default_index = category_options.index(v_category) if v_category in category_options else 0
-
-        with st.form("voice_confirm_form", clear_on_submit=True):
-            st.caption("Double-check the details below before adding.")
-            vc_date = st.date_input("Date", value=v_date, key="voice_date")
-            vc_category = st.selectbox("Category", category_options, index=default_index, key="voice_cat")
-            vc_amount = st.number_input(
-                "Amount (₹)", min_value=0.0, step=10.0, format="%.2f",
-                value=v_amount if v_amount is not None else 0.0, key="voice_amt"
-            )
-            vc_description = st.text_input("Description", value=v_description, key="voice_desc")
-
-            col_confirm, col_discard = st.columns(2)
-            with col_confirm:
-                voice_confirmed = st.form_submit_button("✅ Add", width='stretch')
-            with col_discard:
-                voice_discarded = st.form_submit_button("❌ Discard", width='stretch')
-
-            if voice_confirmed:
-                if vc_amount <= 0:
-                    st.warning("Enter an amount greater than 0.")
-                else:
-                    db.add_expense(str(vc_date), vc_category, vc_description, vc_amount)
-                    st.success(f"Added {icon_for(vc_category)} ₹{vc_amount:.2f} — {vc_category}")
-                    st.query_params.clear()
-                    st.rerun()
-
-            if voice_discarded:
-                st.query_params.clear()
-                st.rerun()
+    st.caption('Tap "Use & Add" — it\'s added right away, no extra click.')
 
     st.divider()
 
